@@ -1,77 +1,174 @@
+// ignore_for_file: prefer_final_fields
+
+import 'dart:async';
 import 'dart:developer';
 
-import 'package:flutter_osm_plugin/flutter_osm_plugin.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart' as fm;
+import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:get/get.dart';
+import 'package:latlong2/latlong.dart';
+import 'package:permission_handler/permission_handler.dart';
 
-class HomeController extends GetxController {
-  var permission = Rxn<LocationPermission>();
-  Rx<Position> deviceCoordinate = Position(
-    longitude: 0,
-    latitude: 0,
-    timestamp: DateTime.now(),
-    accuracy: 0,
-    altitude: 0,
-    altitudeAccuracy: 0,
-    heading: 0,
-    headingAccuracy: 0,
-    speed: 0,
-    speedAccuracy: 0,
-  ).obs;
-  MapController mapController = MapController(
-    initPosition: GeoPoint(
-      latitude: 0,
-      longitude: 0,
-    ),
-    areaLimit: BoundingBox(
-      east: 10.4922941,
-      north: 47.8084648,
-      south: 45.817995,
-      west: 5.9559113,
-    ),
-  );
+class HomeController extends GetxController with GetTickerProviderStateMixin {
+  var _permission = Rxn<PermissionStatus>();
+  var _deviceCoordinate = Rxn<LatLng>();
+
+  late LocationSettings _locationSettings;
+  late StreamSubscription<Position> _streamPosition;
+  late AnimatedMapController _animatedMapController;
+  late fm.MapOptions _mapOptions;
+
+  LatLng? _coordinateTomove;
+
+  RxBool _isTracking = true.obs;
+
+  AnimatedMapController get animatedMapController => _animatedMapController;
+  fm.MapOptions get mapOptions => _mapOptions;
+  Rxn<PermissionStatus> get permission => _permission;
+  Rxn<LatLng> get deviceCoordinate => _deviceCoordinate;
+  RxBool get isTracking => _isTracking;
 
   @override
   void onInit() async {
-    permission.value = await Geolocator.checkPermission();
+    _animatedMapController = AnimatedMapController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500),
+      curve: Curves.easeIn,
+    );
 
-    if (permission.value == LocationPermission.denied) {
-      await requestLocationPermission();
-    }
+    _mapOptions = fm.MapOptions(
+      initialCenter: LatLng(
+        _deviceCoordinate.value?.latitude ?? 0,
+        _deviceCoordinate.value?.longitude ?? 0,
+      ),
+      initialZoom: 20,
+    );
+
+    await requestLocationPermission();
+
+    _locationSettings = const LocationSettings(
+      accuracy: LocationAccuracy.high,
+    );
+
+    _streamPosition = Geolocator.getPositionStream(
+      locationSettings: _locationSettings,
+    ).listen((position) {
+      _coordinateTomove = LatLng(
+        position.latitude,
+        position.longitude,
+      );
+      _moveMap(_coordinateTomove!);
+    });
+
     super.onInit();
   }
 
+  @override
+  void dispose() {
+    _animatedMapController.dispose();
+    _streamPosition.cancel();
+    super.dispose();
+  }
+
   requestLocationPermission() async {
-    var locationPermission = await Geolocator.requestPermission();
+    var locationPermission = await Permission.location.request();
 
     log('$locationPermission');
+    permission.value = locationPermission;
 
-    if (locationPermission == LocationPermission.always ||
-        locationPermission == LocationPermission.whileInUse) {
-      permission.value = locationPermission;
+    if (locationPermission == PermissionStatus.granted) {
       await getDeviceCoordinate();
-    } else {
-      await Geolocator.requestPermission();
     }
   }
 
   getDeviceCoordinate() async {
-    deviceCoordinate.value = await Geolocator.getCurrentPosition();
-    GeoPoint devicePoint = GeoPoint(
-      latitude: deviceCoordinate.value.latitude,
-      longitude: deviceCoordinate.value.longitude,
+    var position = await Geolocator.getCurrentPosition();
+    var latLong = LatLng(
+      position.latitude,
+      position.longitude,
     );
-    // mapController.setMarkerIcon(
-    //   devicePoint,
-    //   const MarkerIcon(
-    //     icon: Icon(Icons.location_on),
-    //   ),
-    // );
-    await mapController.goToLocation(devicePoint);
-    await mapController.setZoom(
-      zoomLevel: 16,
-      stepZoom: 5,
+
+    _moveMap(latLong);
+    log('POSITION ${_deviceCoordinate.value}');
+  }
+
+  _setMarkerCoordinate(LatLng? coordinate) {
+    _deviceCoordinate.value = LatLng(
+      coordinate?.latitude ?? 0,
+      coordinate?.longitude ?? 0,
     );
-    log('POSITION ${deviceCoordinate.value}');
+
+    _coordinateTomove = _deviceCoordinate.value;
+  }
+
+  pauseTracking() {
+    if (_isTracking.value) {
+      _streamPosition.pause();
+      _isTracking.value = false;
+    } else {
+      _streamPosition.resume();
+      _isTracking.value = true;
+    }
+  }
+
+  void _moveMap(LatLng coordinate) {
+    _setMarkerCoordinate(coordinate);
+
+    const startedId = 'AnimatedMapController#MoveStarted';
+    const inProgressId = 'AnimatedMapController#MoveInProgress';
+    const finishedId = 'AnimatedMapController#MoveFinished';
+    // Create some tweens. These serve to split up the transition from one location to another.
+    // In our case, we want to split the transition be<tween> our current map center and the destination.
+    final camera = _animatedMapController.mapController.camera;
+    final latTween =
+        Tween<double>(begin: camera.center.latitude, end: coordinate.latitude);
+    final lngTween = Tween<double>(
+        begin: camera.center.longitude, end: coordinate.longitude);
+    final zoomTween = Tween<double>(begin: camera.zoom, end: 20);
+
+    // Create a animation controller that has a duration and a TickerProvider.
+    final controller = AnimationController(
+        duration: const Duration(milliseconds: 500), vsync: this);
+    // The animation determines what path the animation will take. You can try different Curves values, although I found
+    // fastOutSlowIn to be my favorite.
+    final Animation<double> animation =
+        CurvedAnimation(parent: controller, curve: Curves.fastOutSlowIn);
+
+    // Note this method of encoding the target destination is a workaround.
+    // When proper animated movement is supported (see #1263) we should be able
+    // to detect an appropriate animated movement event which contains the
+    // target zoom/center.
+    final startIdWithTarget =
+        '$startedId#${coordinate.latitude},${coordinate.longitude},20';
+    bool hasTriggeredMove = false;
+
+    controller.addListener(() {
+      final String id;
+      if (animation.value == 1.0) {
+        id = finishedId;
+      } else if (!hasTriggeredMove) {
+        id = startIdWithTarget;
+      } else {
+        id = inProgressId;
+      }
+
+      hasTriggeredMove |= _animatedMapController.mapController.move(
+        LatLng(latTween.evaluate(animation), lngTween.evaluate(animation)),
+        zoomTween.evaluate(animation),
+        id: id,
+      );
+    });
+
+    animation.addStatusListener((status) {
+      if (status == AnimationStatus.completed) {
+        controller.dispose();
+      } else if (status == AnimationStatus.dismissed) {
+        controller.dispose();
+      }
+    });
+
+    controller.forward();
   }
 }
