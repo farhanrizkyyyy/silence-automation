@@ -42,6 +42,7 @@ dependencies:
   permission_handler: ^10.4.5
   latlong2: ^0.9.0
   flutter_map_animations: ^0.5.3
+  vector_math: ^2.1.4
 
 dev_dependencies:
   flutter_test:

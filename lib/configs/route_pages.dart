@@ -7,7 +7,7 @@ class RoutePages {
   static List<GetPage> pages = <GetPage>[
     GetPage(
       name: RouteNames.home,
-      page: () => HomeScreen(),
+      page: () => const HomeScreen(),
       binding: HomeBinding(),
     ),
   ];
